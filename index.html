@@ -1,0 +1,995 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0c0d11">
+<title>Grocery Run</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Fraunces:opsz,wght@9..144,400;9..144,700&display=swap" rel="stylesheet">
+
+<!-- ============================================================
+  FIREBASE SETUP (required for shared sync between devices)
+  
+  1. Go to https://console.firebase.google.com
+  2. Create a new project (free tier is plenty)
+  3. Go to Project Settings > General > Your Apps > Add Web App
+  4. Copy your config values below
+  5. Go to Realtime Database > Create Database > Start in Test Mode
+  6. Host this file anywhere (GitHub Pages, Cloudflare Pages, etc.)
+  7. Both you and your wife open the same URL - done!
+  
+  Without Firebase, the app still works using localStorage
+  (but won't sync between devices).
+============================================================ -->
+<script type="module">
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyDgotL8wRz37PBHbCOklTzus-kanL7zKe0",
+  authDomain: "grocery-list-c4437.firebaseapp.com",
+  databaseURL: "https://grocery-list-c4437-default-rtdb.firebaseio.com",
+  projectId: "grocery-list-c4437",
+  storageBucket: "grocery-list-c4437.firebasestorage.app",
+  messagingSenderId: "750706285312",
+  appId: "1:750706285312:web:a544cb65d3132ce9b371e5"
+};
+
+const STORE_CONFIGS = {
+  "Fred Meyer": {
+    color: "#1a6847", accent: "#2dd4a0",
+    sections: ["Produce","Deli","Bakery","Dairy","Meat & Seafood","Frozen","Pantry","Snacks & Beverages","Health & Beauty","Household","Other"]
+  },
+  "Costco": {
+    color: "#c4122f", accent: "#ff6b6b",
+    sections: ["Fresh & Refrigerated","Frozen","Pantry & Dry Goods","Beverages","Bakery","Household & Cleaning","Health & Personal","Other"]
+  },
+  "Trader Joe's": {
+    color: "#c33b2e", accent: "#ff8c69",
+    sections: ["Produce","Refrigerated","Frozen","Snacks","Pantry","Beverages","Other"]
+  },
+  "New Seasons": {
+    color: "#5c7a29", accent: "#a3d977",
+    sections: ["Produce","Deli & Prepared","Meat & Seafood","Dairy","Bakery","Bulk","Frozen","Pantry","Beer & Wine","Other"]
+  },
+  "Target": {
+    color: "#cc0000", accent: "#ff4444",
+    sections: ["Grocery","Frozen","Snacks & Beverages","Baby","Household","Health & Beauty","Other"]
+  }
+};
+
+// ---- Storage Layer ----
+let db = null;
+let dbRef = null;
+let useFirebase = false;
+
+async function initStorage() {
+  // Always render something within 3 seconds no matter what
+  const fallbackTimer = setTimeout(() => {
+    console.warn("Firebase took too long, rendering with defaults");
+    document.getElementById("sync-badge").textContent = "local only";
+    render();
+  }, 3000);
+
+  if (FIREBASE_CONFIG && FIREBASE_CONFIG.databaseURL) {
+    try {
+      const { initializeApp } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
+      const { getDatabase, ref, set, onValue } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js");
+      const app = initializeApp(FIREBASE_CONFIG);
+      db = getDatabase(app);
+      dbRef = ref(db, "grocery-list");
+      useFirebase = true;
+      document.getElementById("sync-badge").textContent = "connecting...";
+
+      // Listen for real-time changes
+      onValue(dbRef, (snapshot) => {
+        clearTimeout(fallbackTimer);
+        const val = snapshot.val();
+        if (val) {
+          APP_STATE = val;
+        }
+        // Ensure stores object exists even if DB has partial data
+        if (!APP_STATE.stores) APP_STATE.stores = {};
+        if (!APP_STATE.customStores) APP_STATE.customStores = {};
+        // Firebase drops empty arrays, so re-add default stores if missing
+        // Also convert Firebase objects back to arrays and handle _empty placeholders
+        Object.keys(STORE_CONFIGS).forEach(s => {
+          if (!APP_STATE.stores[s] || APP_STATE.stores[s]._empty) {
+            APP_STATE.stores[s] = [];
+          }
+        });
+        Object.keys(APP_STATE.stores).forEach(s => {
+          const val = APP_STATE.stores[s];
+          if (val && val._empty) {
+            APP_STATE.stores[s] = [];
+          } else if (val && !Array.isArray(val)) {
+            // Firebase converts arrays to objects with numeric keys
+            APP_STATE.stores[s] = Object.values(val);
+          }
+        });
+        // If database was empty, seed it (use placeholder for empty stores)
+        if (!val) {
+          const toSave = JSON.parse(JSON.stringify(APP_STATE));
+          // Firebase can't store empty arrays, use placeholder
+          Object.keys(toSave.stores).forEach(s => {
+            if (Array.isArray(toSave.stores[s]) && toSave.stores[s].length === 0) {
+              toSave.stores[s] = { _empty: true };
+            }
+          });
+          set(dbRef, toSave).catch(e => console.warn("Failed to seed DB:", e));
+        }
+        document.getElementById("sync-badge").textContent = "live sync";
+        document.getElementById("sync-badge").classList.add("live");
+        render();
+      }, (error) => {
+        // onValue error callback (permissions, network, etc.)
+        clearTimeout(fallbackTimer);
+        console.warn("Firebase listener error:", error);
+        useFirebase = false;
+        document.getElementById("sync-badge").textContent = "local only";
+        render();
+      });
+      return;
+    } catch (e) {
+      clearTimeout(fallbackTimer);
+      console.warn("Firebase init failed, falling back to localStorage:", e);
+    }
+  }
+  // Fallback: localStorage
+  clearTimeout(fallbackTimer);
+  const saved = localStorage.getItem("grocery-list");
+  if (saved) {
+    APP_STATE = JSON.parse(saved);
+  }
+  document.getElementById("sync-badge").textContent = "local only";
+  render();
+}
+
+async function saveState() {
+  if (useFirebase && db) {
+    const { ref, set } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js");
+    // Firebase drops empty arrays, so use placeholder
+    const toSave = JSON.parse(JSON.stringify(APP_STATE));
+    Object.keys(toSave.stores || {}).forEach(s => {
+      if (Array.isArray(toSave.stores[s]) && toSave.stores[s].length === 0) {
+        toSave.stores[s] = { _empty: true };
+      }
+    });
+    await set(ref(db, "grocery-list"), toSave);
+  } else {
+    localStorage.setItem("grocery-list", JSON.stringify(APP_STATE));
+  }
+}
+
+// ---- App State ----
+let APP_STATE = { stores: {}, customStores: {} };
+Object.keys(STORE_CONFIGS).forEach(s => { APP_STATE.stores[s] = []; });
+
+let activeStore = Object.keys(STORE_CONFIGS)[0];
+let showChecked = {};
+let editingItemId = null;
+
+function getConfig(store) {
+  return STORE_CONFIGS[store] || APP_STATE.customStores?.[store] || { color: "#4a5568", accent: "#a0aec0", sections: ["General","Other"] };
+}
+
+function uid() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+
+// ---- Render ----
+function render() {
+  const app = document.getElementById("app");
+  const allStores = Object.keys(APP_STATE.stores || {});
+  if (!allStores.includes(activeStore) && allStores.length) activeStore = allStores[0];
+
+  const items = APP_STATE.stores[activeStore] || [];
+  const unchecked = items.filter(i => !i.checked);
+  const checked = items.filter(i => i.checked);
+  const config = getConfig(activeStore);
+
+  // Group by section
+  const grouped = {};
+  config.sections.forEach(s => {
+    const sItems = unchecked.filter(i => i.section === s);
+    if (sItems.length) grouped[s] = sItems;
+  });
+  const orphans = unchecked.filter(i => !config.sections.includes(i.section));
+  if (orphans.length) grouped["Uncategorized"] = orphans;
+
+  const totalCount = allStores.reduce((sum, s) => sum + (APP_STATE.stores[s] || []).filter(i => !i.checked).length, 0);
+
+  // Tab bar
+  document.getElementById("store-tabs").innerHTML = allStores.map(store => {
+    const sc = getConfig(store);
+    const count = (APP_STATE.stores[store] || []).filter(i => !i.checked).length;
+    const active = store === activeStore;
+    return `<button class="store-tab ${active ? 'active' : ''}" data-store="${esc(store)}" style="--sc: ${sc.color}; --sa: ${sc.accent}">
+      ${esc(store)}${count > 0 ? ` <span class="tab-count">${count}</span>` : ''}
+    </button>`;
+  }).join('');
+
+  document.getElementById("total-count").textContent = `${totalCount} item${totalCount !== 1 ? 's' : ''} remaining`;
+
+  // Set CSS vars for active store
+  document.documentElement.style.setProperty('--active-color', config.color);
+  document.documentElement.style.setProperty('--active-accent', config.accent);
+
+  // Main list
+  let html = '';
+
+  if (!Object.keys(grouped).length && !checked.length) {
+    html = `<div class="empty-state">
+      <div class="empty-icon">✨</div>
+      <div>Nothing here yet</div>
+      <div class="empty-sub">Tap + to add items</div>
+    </div>`;
+  }
+
+  Object.entries(grouped).forEach(([section, sItems]) => {
+    html += `<div class="section-group">
+      <div class="section-header">
+        <span class="section-label">${esc(section)}</span>
+        <span class="section-line"></span>
+        <span class="section-count">${sItems.length}</span>
+      </div>`;
+    sItems.forEach(item => {
+      html += renderItem(item, false);
+    });
+    html += `</div>`;
+  });
+
+  if (checked.length) {
+    const isOpen = showChecked[activeStore];
+    html += `<div class="checked-section">
+      <button class="checked-toggle" onclick="toggleCheckedSection()">
+        <span class="chevron ${isOpen ? 'open' : ''}">&#9656;</span>
+        Checked (${checked.length})
+      </button>`;
+    if (isOpen) {
+      checked.forEach(item => { html += renderItem(item, true); });
+      html += `<button class="clear-btn" onclick="clearChecked()">Clear checked</button>`;
+    }
+    html += `</div>`;
+  }
+
+  document.getElementById("item-list").innerHTML = html;
+
+  // FAB color
+  const fab = document.getElementById("fab");
+  fab.style.background = config.color;
+  fab.style.boxShadow = `0 4px 24px ${config.color}77`;
+}
+
+function renderItem(item, isChecked) {
+  const config = getConfig(activeStore);
+  return `<div class="item-row ${isChecked ? 'checked' : ''}" data-id="${item.id}">
+    <button class="checkbox ${isChecked ? 'done' : ''}" onclick="toggleItem('${item.id}')" style="--ac: ${config.accent}">
+      ${isChecked ? '&#10003;' : ''}
+    </button>
+    <div class="item-name ${isChecked ? 'struck' : ''}">${esc(item.name)}</div>
+    ${item.qty > 1 ? `<span class="item-qty">×${item.qty}</span>` : ''}
+    <button class="item-menu" onclick="toggleMenu(event, '${item.id}')">···</button>
+    ${editingItemId === item.id ? `<div class="item-dropdown">
+      <button onclick="deleteItem('${item.id}')">Delete</button>
+    </div>` : ''}
+  </div>`;
+}
+
+function esc(str) {
+  const d = document.createElement('div');
+  d.textContent = str;
+  return d.innerHTML;
+}
+
+// ---- Actions ----
+window.toggleItem = async function(id) {
+  const items = APP_STATE.stores[activeStore];
+  const item = items.find(i => i.id === id);
+  if (item) {
+    item.checked = !item.checked;
+    item.checkedAt = item.checked ? Date.now() : null;
+    await saveState();
+    render();
+  }
+};
+
+window.toggleMenu = function(e, id) {
+  e.stopPropagation();
+  editingItemId = editingItemId === id ? null : id;
+  render();
+};
+
+window.deleteItem = async function(id) {
+  APP_STATE.stores[activeStore] = APP_STATE.stores[activeStore].filter(i => i.id !== id);
+  editingItemId = null;
+  await saveState();
+  render();
+};
+
+window.toggleCheckedSection = function() {
+  showChecked[activeStore] = !showChecked[activeStore];
+  render();
+};
+
+window.clearChecked = async function() {
+  APP_STATE.stores[activeStore] = APP_STATE.stores[activeStore].filter(i => !i.checked);
+  await saveState();
+  render();
+};
+
+// Tab clicks
+document.getElementById("store-tabs").addEventListener("click", (e) => {
+  const btn = e.target.closest(".store-tab");
+  if (btn) {
+    activeStore = btn.dataset.store;
+    editingItemId = null;
+    render();
+  }
+});
+
+// Close menus on body tap
+document.addEventListener("click", (e) => {
+  if (editingItemId && !e.target.closest(".item-menu") && !e.target.closest(".item-dropdown")) {
+    editingItemId = null;
+    render();
+  }
+});
+
+// ---- Add Item Modal ----
+const modal = document.getElementById("add-modal");
+const addNameInput = document.getElementById("add-name");
+const addStoreSelect = document.getElementById("add-store");
+const addQtyInput = document.getElementById("add-qty");
+const addSectionsDiv = document.getElementById("add-sections");
+const addBtn = document.getElementById("add-submit");
+let selectedSection = "";
+
+document.getElementById("fab").addEventListener("click", () => {
+  openAddModal();
+});
+
+function openAddModal() {
+  modal.classList.add("open");
+  addNameInput.value = "";
+  addQtyInput.value = "1";
+
+  // Populate stores dropdown
+  const allStores = Object.keys(APP_STATE.stores || {});
+  addStoreSelect.innerHTML = allStores.map(s => `<option value="${esc(s)}" ${s === activeStore ? 'selected' : ''}>${esc(s)}</option>`).join('');
+
+  populateSections(activeStore);
+  setTimeout(() => addNameInput.focus(), 200);
+  updateAddBtn();
+}
+
+function populateSections(store) {
+  const config = getConfig(store);
+  selectedSection = config.sections[0];
+  addSectionsDiv.innerHTML = config.sections.map(s =>
+    `<button class="section-pill ${s === selectedSection ? 'active' : ''}" data-section="${esc(s)}" style="--sc: ${config.color}">${esc(s)}</button>`
+  ).join('');
+}
+
+addStoreSelect.addEventListener("change", () => {
+  populateSections(addStoreSelect.value);
+});
+
+addSectionsDiv.addEventListener("click", (e) => {
+  const pill = e.target.closest(".section-pill");
+  if (pill) {
+    selectedSection = pill.dataset.section;
+    addSectionsDiv.querySelectorAll(".section-pill").forEach(p => p.classList.remove("active"));
+    pill.classList.add("active");
+  }
+});
+
+addNameInput.addEventListener("input", updateAddBtn);
+
+function updateAddBtn() {
+  addBtn.disabled = !addNameInput.value.trim();
+}
+
+addBtn.addEventListener("click", addItem);
+addNameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") addItem(); });
+
+async function addItem() {
+  const name = addNameInput.value.trim();
+  if (!name) return;
+  const store = addStoreSelect.value;
+  const section = selectedSection || getConfig(store).sections[0];
+  const qty = parseInt(addQtyInput.value) || 1;
+
+  if (!APP_STATE.stores[store]) APP_STATE.stores[store] = [];
+  APP_STATE.stores[store].push({ id: uid(), name, section, qty, checked: false, addedAt: Date.now() });
+  await saveState();
+
+  activeStore = store;
+  modal.classList.remove("open");
+  render();
+}
+
+document.getElementById("add-close").addEventListener("click", () => modal.classList.remove("open"));
+modal.addEventListener("click", (e) => { if (e.target === modal) modal.classList.remove("open"); });
+
+// ---- Manage Stores Modal ----
+const storesModal = document.getElementById("stores-modal");
+document.getElementById("stores-btn").addEventListener("click", () => {
+  storesModal.classList.add("open");
+  renderStoresModal();
+});
+document.getElementById("stores-close").addEventListener("click", () => storesModal.classList.remove("open"));
+storesModal.addEventListener("click", (e) => { if (e.target === storesModal) storesModal.classList.remove("open"); });
+
+function renderStoresModal() {
+  const allStores = Object.keys(APP_STATE.stores || {});
+  let html = allStores.map(s => {
+    const sc = getConfig(s);
+    const isBuiltIn = !!STORE_CONFIGS[s];
+    const count = (APP_STATE.stores[s] || []).length;
+    return `<div class="store-row">
+      <div class="store-row-left">
+        <span class="store-dot" style="background:${sc.color}"></span>
+        <span class="store-name">${esc(s)}</span>
+        <span class="store-item-count">${count} items</span>
+      </div>
+      ${!isBuiltIn ? `<button class="store-remove" onclick="removeStore('${esc(s)}')">Remove</button>` : ''}
+    </div>`;
+  }).join('');
+  document.getElementById("stores-list").innerHTML = html;
+}
+
+document.getElementById("add-store-btn").addEventListener("click", async () => {
+  const name = document.getElementById("new-store-name").value.trim();
+  if (!name) return;
+  const sectionsRaw = document.getElementById("new-store-sections").value;
+  let sections = sectionsRaw.split(",").map(s => s.trim()).filter(Boolean);
+  if (!sections.length) sections = ["General", "Other"];
+  const colors = ["#6b46c1","#2b6cb0","#c05621","#2f855a","#9b2c2c","#4a5568"];
+  const accents = ["#b794f6","#63b3ed","#fbd38d","#68d391","#feb2b2","#cbd5e0"];
+  const idx = Object.keys(APP_STATE.customStores || {}).length % colors.length;
+  if (!APP_STATE.customStores) APP_STATE.customStores = {};
+  APP_STATE.customStores[name] = { color: colors[idx], accent: accents[idx], sections };
+  if (!APP_STATE.stores[name]) APP_STATE.stores[name] = [];
+  await saveState();
+  activeStore = name;
+  document.getElementById("new-store-name").value = "";
+  document.getElementById("new-store-sections").value = "";
+  storesModal.classList.remove("open");
+  render();
+});
+
+window.removeStore = async function(name) {
+  delete APP_STATE.stores[name];
+  if (APP_STATE.customStores) delete APP_STATE.customStores[name];
+  await saveState();
+  if (activeStore === name) activeStore = Object.keys(APP_STATE.stores)[0] || "";
+  renderStoresModal();
+  render();
+};
+
+// ---- Init ----
+initStorage();
+</script>
+
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0c0d11;
+    --surface: #14161d;
+    --border: #1e2028;
+    --text: #e8e6e1;
+    --text-dim: #555;
+    --active-color: #1a6847;
+    --active-accent: #2dd4a0;
+  }
+
+  html, body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Mono', 'Courier New', monospace;
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+    overscroll-behavior: none;
+    min-height: 100dvh;
+  }
+
+  /* Header */
+  .header {
+    padding: 20px 16px 0;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    z-index: 40;
+  }
+  .header-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .header h1 {
+    font-family: 'Fraunces', Georgia, serif;
+    font-size: 22px;
+    font-weight: 700;
+    color: #fff;
+    letter-spacing: -0.5px;
+  }
+  .header-meta {
+    font-size: 11px;
+    opacity: 0.35;
+    margin-top: 2px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  #sync-badge {
+    display: inline-block;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    padding: 2px 7px;
+    border-radius: 4px;
+    background: #1e2028;
+    color: #666;
+    font-weight: 500;
+  }
+  #sync-badge.live {
+    background: #0e3a2a;
+    color: #2dd4a0;
+    animation: pulse-glow 3s ease-in-out infinite;
+  }
+  @keyframes pulse-glow {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+  }
+  .stores-btn {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: #888;
+    padding: 6px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+
+  /* Store Tabs */
+  .store-tabs {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    padding: 14px 0 12px;
+    scrollbar-width: none;
+  }
+  .store-tabs::-webkit-scrollbar { display: none; }
+  .store-tab {
+    flex-shrink: 0;
+    padding: 7px 14px;
+    border-radius: 20px;
+    border: none;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: inherit;
+    background: var(--surface);
+    color: #666;
+    transition: all 0.2s;
+  }
+  .store-tab.active {
+    background: var(--sc);
+    color: #fff;
+  }
+  .tab-count {
+    font-size: 11px;
+    opacity: 0.7;
+  }
+
+  /* Items */
+  #item-list {
+    padding: 4px 16px 120px;
+  }
+  .section-group { margin-bottom: 12px; }
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 12px 0 4px;
+  }
+  .section-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--active-accent);
+    opacity: 0.8;
+    white-space: nowrap;
+  }
+  .section-line {
+    flex: 1;
+    height: 1px;
+    background: var(--active-accent);
+    opacity: 0.15;
+  }
+  .section-count {
+    font-size: 10px;
+    color: var(--active-accent);
+    opacity: 0.4;
+  }
+
+  .item-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 11px 4px;
+    border-bottom: 1px solid #13151b;
+    position: relative;
+    animation: fadeSlideIn 0.2s ease;
+  }
+  @keyframes fadeSlideIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .item-row.checked { opacity: 0.35; }
+
+  .checkbox {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    border: 2px solid color-mix(in srgb, var(--ac) 30%, transparent);
+    background: none;
+    cursor: pointer;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    color: var(--ac);
+    transition: all 0.15s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .checkbox:active {
+    transform: scale(0.9);
+  }
+  .checkbox.done {
+    background: color-mix(in srgb, var(--ac) 20%, transparent);
+    border-color: color-mix(in srgb, var(--ac) 40%, transparent);
+  }
+
+  .item-name {
+    flex: 1;
+    font-size: 15px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .item-name.struck { text-decoration: line-through; }
+  .item-qty {
+    font-size: 12px;
+    color: var(--active-accent);
+    opacity: 0.7;
+    font-weight: 500;
+  }
+  .item-menu {
+    background: none;
+    border: none;
+    color: #444;
+    font-size: 16px;
+    cursor: pointer;
+    padding: 6px 2px;
+    font-family: inherit;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .item-dropdown {
+    position: absolute;
+    right: 0;
+    top: 100%;
+    z-index: 20;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 4px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  }
+  .item-dropdown button {
+    display: block;
+    width: 100%;
+    padding: 8px 20px;
+    background: none;
+    border: none;
+    color: #ff6b6b;
+    font-size: 13px;
+    cursor: pointer;
+    font-family: inherit;
+    border-radius: 6px;
+    text-align: left;
+  }
+
+  /* Checked section */
+  .checked-section { margin-top: 20px; }
+  .checked-toggle {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 0;
+    font-family: inherit;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .chevron {
+    display: inline-block;
+    transition: transform 0.2s;
+  }
+  .chevron.open { transform: rotate(90deg); }
+  .clear-btn {
+    margin-top: 8px;
+    padding: 6px 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: #ff6b6b;
+    font-size: 11px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+
+  /* Empty state */
+  .empty-state {
+    text-align: center;
+    padding: 60px 20px;
+    opacity: 0.3;
+  }
+  .empty-icon { font-size: 40px; margin-bottom: 12px; }
+  .empty-sub { font-size: 12px; margin-top: 4px; }
+
+  /* FAB */
+  #fab {
+    position: fixed;
+    bottom: max(28px, env(safe-area-inset-bottom, 28px));
+    right: 24px;
+    width: 58px;
+    height: 58px;
+    border-radius: 18px;
+    border: none;
+    color: #fff;
+    font-size: 30px;
+    font-weight: 300;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 50;
+    transition: transform 0.15s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #fab:active { transform: scale(0.92); }
+
+  /* Modals */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 100;
+    align-items: flex-end;
+    justify-content: center;
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+  }
+  .modal-overlay.open { display: flex; }
+  .modal-sheet {
+    background: var(--surface);
+    border-radius: 20px 20px 0 0;
+    padding: 24px 20px calc(20px + env(safe-area-inset-bottom, 20px));
+    width: 100%;
+    max-width: 480px;
+    max-height: 85dvh;
+    overflow-y: auto;
+    animation: slideUp 0.25s ease;
+  }
+  @keyframes slideUp {
+    from { transform: translateY(100%); }
+    to { transform: translateY(0); }
+  }
+  .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+  }
+  .modal-header h3 {
+    font-family: 'Fraunces', Georgia, serif;
+    font-size: 17px;
+    color: #fff;
+  }
+  .modal-close {
+    background: none;
+    border: none;
+    color: #666;
+    font-size: 20px;
+    cursor: pointer;
+    padding: 4px;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Form elements */
+  .form-input {
+    width: 100%;
+    padding: 12px 14px;
+    background: #0c0d11;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    color: #fff;
+    font-size: 16px;
+    font-family: inherit;
+    outline: none;
+    -webkit-appearance: none;
+  }
+  .form-input:focus { border-color: #333; }
+  .form-input::placeholder { color: #444; }
+  .form-select {
+    width: 100%;
+    padding: 10px 10px;
+    background: #0c0d11;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: #fff;
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+    -webkit-appearance: none;
+  }
+  .form-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+    display: block;
+    margin-bottom: 4px;
+  }
+  .form-row { display: flex; gap: 8px; margin-bottom: 12px; }
+  .form-group { flex: 1; }
+  .qty-group { width: 64px; }
+
+  /* Section pills */
+  .sections-wrap {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 16px;
+  }
+  .section-pill {
+    padding: 6px 12px;
+    border-radius: 16px;
+    border: none;
+    font-size: 12px;
+    cursor: pointer;
+    font-family: inherit;
+    background: #0c0d11;
+    color: #777;
+    transition: all 0.15s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .section-pill.active {
+    background: var(--sc);
+    color: #fff;
+  }
+
+  .submit-btn {
+    width: 100%;
+    padding: 14px;
+    border-radius: 14px;
+    border: none;
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.2s;
+    background: var(--active-color);
+  }
+  .submit-btn:disabled { background: var(--border); color: #555; cursor: default; }
+  .submit-btn:active:not(:disabled) { transform: scale(0.98); }
+
+  /* Store management */
+  .store-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 4px;
+    border-bottom: 1px solid var(--border);
+  }
+  .store-row-left { display: flex; align-items: center; gap: 10px; }
+  .store-dot { width: 10px; height: 10px; border-radius: 3px; }
+  .store-name { font-size: 14px; }
+  .store-item-count { font-size: 11px; color: var(--text-dim); }
+  .store-remove {
+    background: none;
+    border: none;
+    color: #ff6b6b;
+    font-size: 11px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .divider {
+    border-top: 1px solid var(--border);
+    margin: 16px 0;
+    padding-top: 16px;
+  }
+  .sub-heading {
+    font-size: 12px;
+    font-weight: 700;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 10px;
+  }
+</style>
+
+<div class="header">
+  <div class="header-top">
+    <div>
+      <h1>Grocery Run</h1>
+      <div class="header-meta">
+        <span id="total-count">0 items remaining</span>
+        <span id="sync-badge">...</span>
+      </div>
+    </div>
+    <button class="stores-btn" id="stores-btn">⚙ Stores</button>
+  </div>
+  <div class="store-tabs" id="store-tabs"></div>
+</div>
+
+<div id="item-list"></div>
+
+<button id="fab">+</button>
+
+<!-- Add Item Modal -->
+<div class="modal-overlay" id="add-modal">
+  <div class="modal-sheet">
+    <div class="modal-header">
+      <h3>Add Item</h3>
+      <button class="modal-close" id="add-close">✕</button>
+    </div>
+    <input class="form-input" id="add-name" placeholder="What do you need?" style="margin-bottom:12px" autocomplete="off">
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Store</label>
+        <select class="form-select" id="add-store"></select>
+      </div>
+      <div class="qty-group">
+        <label class="form-label">Qty</label>
+        <input class="form-input" id="add-qty" type="number" min="1" value="1" style="text-align:center;padding:10px 4px;font-size:13px">
+      </div>
+    </div>
+    <label class="form-label">Section</label>
+    <div class="sections-wrap" id="add-sections"></div>
+    <button class="submit-btn" id="add-submit" disabled>Add to list</button>
+  </div>
+</div>
+
+<!-- Manage Stores Modal -->
+<div class="modal-overlay" id="stores-modal">
+  <div class="modal-sheet">
+    <div class="modal-header">
+      <h3>Manage Stores</h3>
+      <button class="modal-close" id="stores-close">✕</button>
+    </div>
+    <div id="stores-list"></div>
+    <div class="divider">
+      <div class="sub-heading">Add Custom Store</div>
+      <input class="form-input" id="new-store-name" placeholder="Store name" style="margin-bottom:8px">
+      <input class="form-input" id="new-store-sections" placeholder="Sections (comma separated)" style="font-size:13px;margin-bottom:10px">
+      <button class="submit-btn" id="add-store-btn" style="background:#4a5568">Add Store</button>
+    </div>
+  </div>
+</div>
+
+<div id="app"></div>
+</html>
